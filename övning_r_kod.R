@@ -1,0 +1,221 @@
+if(!"pacman" %in% installed.packages()[,"Package"]) install.packages("pacman")
+
+pacman::p_load(tidyverse,
+               lubridate,
+               CausalImpact,
+               scales)
+
+
+# 6. Del 2 - Estimera kausal effekt av en marknadsföringskampanj med Causal Impact
+
+cat("Den första December 2019 startade företaget en marknadsföringskampanj med syftet att sälja mer produkter inför Jul. Tanken var att öka exponeringen både på sociala medier samt att få mer betald trafik genom Google's annonser (*Pay-Per-Click*) med slutmålet att öka försäljningen. 
+
+Din uppgift är att estimera effekten av marknadsföringskampanjen som startade den 1 December 2019 och varade månaden ut. Mer specifikt är din uppgift är att estimera hur många extra sessioner som kampanjen genererade under december månad från början till slut.
+
+Till hjälp har vi R-paketet *Causal Impact*. Skumma gärna igenom följande artikel innan du börjar: https://google.github.io/CausalImpact/CausalImpact.html  
+
+Det data vi har till förfogande importeras först genom koden nedan.")
+
+
+
+read_csv("https://raw.githubusercontent.com/SimonLoefwander/ci_exercise/master/traffic_long.csv") -> traffic_long
+
+traffic_long %>% glimpse()
+
+
+cat("Då vi vill veta hur många sessioner från betald trafik som har tillkommit är sessioner från *Paid Search* vår **event-variabel**. Modellen kräver att vi också anger en **kontrollvariabel** som ska ha varit opåverkad av kampanjen. Eftersom direkt trafik (*direct*) bör vara opåverkad använder vi den som kontroll. 
+
+Sedan behöver vi filtrera och transformera vår data. Vi plockar först ut sessioner från de relevanta källorna med koden nedan.")
+
+
+traffic_long %>%
+  dplyr::select(default_channel_grouping, date, sessions) %>% 
+  filter(default_channel_grouping %in% c("Paid Search", "Direct")) -> traffic_data
+
+traffic_data %>% 
+  ggplot(aes(x = date, y = sessions,
+             color = default_channel_grouping)) +
+  geom_line() +
+  geom_vline(xintercept = as.Date("2019-12-01")) +
+  labs(
+    color = "",
+    x = "",
+    y = "Sessions",
+    title = "Sessions by traffic source"
+  ) +
+  scale_color_manual(values = c("skyblue", "dark red")) +
+  facet_grid(rows = vars(default_channel_grouping), scales = "free") +
+  theme_minimal() +
+  theme(legend.position = "top",
+        panel.spacing = unit(2, "lines"))
+
+
+cat("Därefter måste vi transformera datat så att det kan hanteras av *CausalImpact()* - funktionen. Det gör vi genom att använda *spread* funktionen från *tidyr*. Vi lägger även till ett index då det behövs senare. ")
+
+
+traffic_data %>% glimpse()
+
+traffic_data %>%
+  tidyr::spread(default_channel_grouping, sessions) %>% 
+  rename_all(.funs = function(x) x %>% 
+               tolower %>% 
+               gsub(" ", "_",.)) %>%
+  arrange(date) %>%
+  mutate(index = row_number())  -> traffic_wide_tbl
+
+traffic_wide_tbl %>% glimpse()
+
+
+cat("Sedan behöver vi göra ytterligare ett par transformationer så att vårt data kan hanteras av *CausalImpact()* - funktionen. 
+
+Först definierar vi datumet som kampanjen startade för att kunna få ut motsvarande numeriska index från vårt data. Det gör vi för att kunna berätta för CausalImpact vilka index som tillhör *pre-perioden* (i.e. före kampanjen) och *post-perioden* (efter kampanjen).")
+
+
+intervention_period = as.Date("...")
+
+traffic_wide_tbl %>% 
+  filter(date == intervention_period ) %>%
+  pull(index) -> intervention_index
+
+traffic_wide_tbl %>% 
+  tail(1) %>% pull(index) -> end_index
+
+c(1,(intervention_index - 1)) -> pre_period 
+c(intervention_index,end_index) -> post_period 
+
+
+cat("Nu kan vi skapa modellen efter att ha konverterat vår *tibble* med data till *matrix* format. ")
+
+
+set.seed(1)
+
+cbind(y = traffic_wide_tbl %>% pull(paid_search),
+      x1 = traffic_wide_tbl %>% pull(direct)) -> int_data
+
+class(int_data)
+
+?CausalImpact
+
+impact <- CausalImpact(..., ..., ...)
+
+...(impact)
+
+
+cat("Som rapporten ovan berättar är sannolikheten för en kausal effekt 99.9%. 
+
+Vi kommer åt resultatet genom *impact*-objektet.")
+
+
+impact$series %>% as_tibble() %>% 
+  mutate(date = seq(as.Date("2019-01-01"), as.Date("2019-12-31"), "day")) %>% 
+  dplyr::select(date, everything()) -> ci_res
+
+ci_res %>% glimpse()
+
+cat("Vi kan visualisera resultatet genom:")
+  
+ci_res %>% 
+  filter(date >= as.Date("2019-09-01")) %>%
+  ggplot(aes(date, y = response)) +
+  geom_line(color = "black", linetype = 2, show.legend = T) +
+  annotate("rect", xmin = as.Date("2019-12-01"),
+           xmax = as.Date("2020-01-01"),
+           ymin =500, ymax = 3000 , 
+           alpha = .07, fill = "dark green") +
+  annotate("rect", xmin = as.Date("2019-09-01"),
+           xmax = as.Date("2019-12-01"),
+           ymin =500, ymax = 3000 , 
+           alpha = .01, fill = "dark red") +
+  geom_line(aes(date, y = point.pred), color = "skyblue", show.legend = T) +
+  geom_ribbon(aes(xmin = date, xmax = date,
+                  ymin =point.pred.lower,
+                  ymax = point.pred.upper ), alpha = 0.2, fill = "skyblue") +
+  scale_y_continuous(expand = c(0.1,0)) +
+  geom_vline(xintercept = as.Date("2019-12-01"), color = "dark green") +
+  labs(
+    x = NULL,
+    y = "Sessions",
+    title = "Sessions - actual vs expected"
+  ) +
+  theme_minimal()
+
+
+cat("Det finns även en inbyggd plotfunktion för en snabbare visualisering. ")
+
+plot(impact)
+
+
+cat("Med modellen skapad är vi nu redo att svara på övningsfrågorna. 
+
+## 2.a. Hur många sessioner observerades totalt mellan 2019-12-01 - 2019-12-31?")
+
+
+traffic_wide_tbl %>% glimpse()
+
+traffic_wide_tbl %>% 
+  filter(date >= as.Date("...") &
+           date <= as.Date("...")) %>% 
+  summarise(... = sum(...)) %>% 
+  pull(...)
+
+cat("## 2.b. Gav kampanjen en signifikant effekt avseende ökning i antal sessioner?")
+
+impact$summary %>% 
+  t() %>% data.frame() %>% 
+  rownames_to_column("variable") %>% 
+  as_tibble() -> impact_results
+
+impact_results 
+
+impact_results %>% 
+  filter(variable == "..." | variable == "...") %>% 
+  pull(...) %>% 
+  round(.,3)
+
+
+cat("## 2.c. Hur många sessioner kan krediteras till kampanjen?")
+
+
+impact_results %>% 
+  filter(variable == "...") %>% 
+  pull(...) %>% round() -> session_effect
+
+session_effect
+
+
+cat("## 2.d. Vad var den totala procentuella ökningen i sessioner?") 
+
+impact_results %>% 
+  filter(variable == "...") %>% 
+  mutate_at(vars(...), function(x) x*10^2) %>%
+  pull(...) %>% 
+  round(.,1) %>%
+  paste0(., "%")
+
+cat("## Extraupgift. Kampanjen kostade $1000 att genomföra. Var det en bra investering? 
+
+*Ledtråd - du räknade ut konverteringsgraden för betald trafik i uppgift 2 c). Du kan även tänkas behöva genomsnittligt transaktionsvärde för att ta reda på snittvärdet av en session från betald trafik.*")
+
+read_csv("https://raw.githubusercontent.com/SimonLoefwander/ci_exercise/master/traffic_source.csv") -> traffic_source_tbl
+
+paid_search_conversion_rate = ...
+
+traffic_source_tbl %>% 
+  group_by(...) %>% 
+  summarise(... = sum(...),
+            ... = sum(...)) %>% 
+  mutate(revenue_per_transaction = ...) %>% 
+  filter(default_channel_grouping == "...") %>% 
+  pull(revenue_per_transaction) %>% 
+  round() -> paid_search_avg_revenue
+
+....*
+  ...*
+  ... -> estimated_value_of_campaign
+
+paste0("$",estimated_value_of_campaign %>% round)
+
+
+cat("Fundera över om du tycker att det här är en bra metod för att se hur lyckad kampanjen var?")
+
+
